@@ -1,0 +1,39 @@
+from pathlib import Path
+
+def generate_report(report_file: Path, parsed_data, mappings, unmapped, yaml_file):
+    """
+    Generates a line-by-line conversion report.
+    - report_file: Path to write the report
+    - parsed_data: dictionary from parser
+    - mappings: list of {'original': str, 'converted': str}
+    - unmapped: list of steps not converted (can be empty for now)
+    - yaml_file: Path to output YAML
+    """
+
+    with open(report_file, "w", encoding="utf-8") as f:
+        f.write("========== UNIFIER CONVERSION REPORT ==========\n\n")
+        f.write(f"Output YAML: {yaml_file}\n\n")
+        
+        f.write("Environment Variables:\n")
+        if "env" in parsed_data:
+            for k, v in parsed_data["env"].items():
+                f.write(f"  {k} = {v}\n")
+        f.write("\n")
+
+        f.write("Stages & Steps Conversion:\n")
+        stage_idx = 1
+        for stage in parsed_data.get("stages", []):
+            f.write(f"\nStage {stage_idx}: {stage['name']}\n")
+            step_idx = 1
+            for step in stage["steps"]:
+                mapped = next((m['converted'] for m in mappings if m['original'] == step), "Not mapped")
+                f.write(f"  Step {step_idx}: {step} -> {mapped}\n")
+                step_idx += 1
+            stage_idx += 1
+
+        if unmapped:
+            f.write("\nUnmapped Steps:\n")
+            for step in unmapped:
+                f.write(f"  {step}\n")
+
+        f.write("\n========== END OF REPORT ==========\n")
