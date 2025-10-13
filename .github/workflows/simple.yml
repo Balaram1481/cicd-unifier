@@ -2,7 +2,7 @@ name: TestApp
 on:
   push:
     branches:
-    - main
+    - master
   pull_request: null
 env:
   APP_NAME: TestApp
