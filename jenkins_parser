@@ -1,0 +1,89 @@
+# src/parsers/jenkins_parser.py
+from typing import List, Dict
+
+def parse_jenkinsfile_lines(lines: List[str]) -> Dict:
+    """
+    Very-simple line-based parser for declarative Jenkinsfile.
+    Returns a dict with keys: agent, environment, stages (list), post
+    Each stage contains {"name": <name>, "steps": [ {"raw_line_no": n, "original": line, "cmd": cmd}, ... ] }
+    """
+    parsed = {
+        "agent": None,
+        "environment": {},
+        "stages": [],
+        "post": {}
+    }
+
+    current_stage = None
+    in_environment = False
+    in_stage = False
+    in_steps = False
+    in_post = False
+    post_block = None
+
+    for i, raw in enumerate(lines, start=1):
+        line = raw.strip()
+        if not line or line.startswith("//"):
+            continue
+
+        # agent
+        if line.startswith("agent"):
+            parsed["agent"] = line
+            continue
+
+        # environment block
+        if line.startswith("environment"):
+            in_environment = True
+            continue
+        if in_environment:
+            if line == "}":
+                in_environment = False
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                parsed["environment"][k.strip()] = v.strip().strip('"').strip("'")
+            continue
+
+        # stage start (simple handling)
+        if line.startswith("stage(") or line.startswith("stage '") or line.startswith("stage \""):
+            in_stage = True
+            name = line.split("(", 1)[1].rstrip("){").strip().strip("'\"")
+            current_stage = {"name": name, "steps": []}
+            parsed["stages"].append(current_stage)
+            continue
+
+        # steps block
+        if line.startswith("steps"):
+            in_steps = True
+            continue
+        if in_steps:
+            if line == "}":
+                in_steps = False
+                continue
+            if line.startswith("sh "):
+                cmd = line.split("sh", 1)[1].strip().strip("'\"")
+                if current_stage:
+                    current_stage["steps"].append({"raw_line_no": i, "original": line, "cmd": cmd})
+            continue
+
+        # post section
+        if line.startswith("post"):
+            in_post = True
+            continue
+        if in_post:
+            if line == "}":
+                in_post = False
+                continue
+            if line.startswith("success"):
+                post_block = "success"
+                parsed["post"][post_block] = []
+                continue
+            if line.startswith("failure"):
+                post_block = "failure"
+                parsed["post"][post_block] = []
+                continue
+            if post_block and (line.startswith("echo ") or line.startswith("sh ")):
+                parsed["post"][post_block].append(line)
+                continue
+
+    return parsed
