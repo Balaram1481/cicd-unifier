@@ -1,0 +1,88 @@
+# src/converter.py
+import sys
+import logging
+from pathlib import Path
+
+from detector import detect_file_type
+from parsers import jenkins_parser
+from report_generator import generate_report
+
+LOG_PATH = "logs/conversion.log"
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
+                    format='[%(asctime)s] %(levelname)s: %(message)s')
+
+def simple_map_step(step_cmd: str) -> str:
+    # placeholder mapping for now
+    return f"run: {step_cmd}"
+
+def run_conversion(input_path: str, output_dir: str):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.info(f"Starting conversion for: {input_path}")
+    file_type = detect_file_type(input_path)
+    logging.info(f"Detected file type: {file_type}")
+
+    parsed = None
+    if file_type == "jenkins":
+        with open(input_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        parsed = jenkins_parser.parse_jenkinsfile_lines(lines)
+    elif file_type == "buildspec":
+        # placeholder: we will implement buildspec parser next
+        logging.warning("Buildspec parser not implemented yet.")
+        print("❌ Buildspec detected but parser not implemented in this step.")
+        return
+    else:
+        logging.warning("Unsupported or unknown file type.")
+        print("❌ Unsupported/unknown file type.")
+        return
+
+    logging.info(f"Parsed agent: {parsed.get('agent')}")
+    logging.info(f"Found stages: {len(parsed.get('stages', []))}")
+
+    mappings = []
+    unmapped = []
+
+    # create mappings for each step (placeholder)
+    for stage in parsed.get("stages", []):
+        for step in stage["steps"]:
+            converted = simple_map_step(step["cmd"])
+            mappings.append({"line_no": step["raw_line_no"], "original": step["original"], "converted": converted})
+            logging.info(f"Converted line {step['raw_line_no']}: {step['original']} -> {converted}")
+
+    # write a simple placeholder YAML output
+    yaml_output_path = str(output_dir / "converted.yml")
+    with open(yaml_output_path, "w", encoding="utf-8") as f:
+        f.write("# Placeholder generated GitHub Actions YAML\n")
+        f.write(f"# Converted from {input_path}\n")
+        f.write("name: Converted-CI\n")
+        f.write("on: [push]\n")
+        f.write("jobs:\n")
+        for stage in parsed.get("stages", []):
+            job_name = stage["name"].lower().replace(" ", "_")
+            f.write(f"  {job_name}:\n")
+            f.write("    runs-on: ubuntu-latest\n")
+            f.write("    steps:\n")
+            f.write("      - uses: actions/checkout@v4\n")
+            for s in stage["steps"]:
+                conv = next((m['converted'] for m in mappings if m['line_no']==s['raw_line_no']), None)
+                if conv:
+                    f.write(f"      - name: {stage['name']} step\n")
+                    f.write(f"        {conv}\n")
+
+    # generate report (report_generator should be present)
+    generate_report("reports/conversion_report.txt", parsed, mappings, unmapped, yaml_output_path)
+    logging.info(f"Conversion complete. YAML: {yaml_output_path}. Report: reports/conversion_report.txt")
+    print("✅ Conversion done.")
+    print(f"Output YAML: {yaml_output_path}")
+    print("Report: reports/conversion_report.txt")
+    print(f"Logs: {LOG_PATH}")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python src/converter.py <input_path> [output_dir]")
+        sys.exit(1)
+    input_path = sys.argv[1]
+    output_dir = sys.argv[2] if len(sys.argv) > 2 else "output"
+    run_conversion(input_path, output_dir)
