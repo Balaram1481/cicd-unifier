@@ -1,3 +1,4 @@
+# src/converter.py
 import sys
 import logging
 from pathlib import Path
@@ -5,9 +6,9 @@ import yaml
 
 from detector import detect_file_type
 from parsers.jenkins_parser import parse_jenkinsfile
-from report_generator import generate_report  # keep this from old version
+from report_generator import generate_report
 
-# ---------- Logging Setup ----------
+# Logging
 LOG_PATH = "logs/conversion.log"
 logging.basicConfig(
     filename=LOG_PATH,
@@ -15,93 +16,147 @@ logging.basicConfig(
     format='[%(asctime)s] %(levelname)s: %(message)s'
 )
 
-# ---------- Step Mapping ----------
-def map_step_to_github(cmd: str) -> str:
+def build_run_block(commands):
     """
-    Placeholder mapping function: converts Jenkins sh/echo to GitHub Actions run
-    Can later be replaced with more advanced mapping logic or AI-based rules
+    Given a list of commands (strings), return a single string suitable
+    for a YAML multi-line run block. Keep order and preserve echos.
     """
-    return f"run: {cmd}"
+    if not commands:
+        return ""
+    if isinstance(commands, str):
+        return commands
+    # join with newlines; GitHub Actions will render as multiline '|' block
+    return "\n".join(commands)
 
-# ---------- YAML Generation ----------
+def prepare_mappings(parsed_data):
+    """
+    Prepare a flat list of mappings for report generation.
+    Each mapping is {'stage': <name>, 'original': <cmd>, 'converted': <converted_run>}
+    """
+    mappings = []
+    for stage in parsed_data.get("stages", []):
+        stage_name = stage.get("name")
+        # stage['steps'] is a list of command strings
+        for cmd in stage.get("steps", []):
+            # For this converter, each original command maps to the same command inside a run
+            converted = f"run: {cmd}"
+            mappings.append({"stage": stage_name, "original": cmd, "converted": converted})
+            logging.info(f"Prepared mapping for stage '{stage_name}': {cmd} -> {converted}")
+    return mappings
+
 def generate_github_actions_yaml(parsed_data, output_file: Path):
+    """
+    Creates a GitHub Actions YAML that:
+      - sets top-level env from parsed_data['env']
+      - creates one job 'build' that contains named steps for each stage
+      - adds conditional success/failure steps at the end
+    """
     workflow = {
-        "name": "Converted CI/CD Workflow",
-        "on": ["push"],
+        "name": parsed_data.get("env", {}).get("APP_NAME", "Converted CI Pipeline"),
+        "on": {
+            "push": {"branches": ["main"]},
+            "pull_request": None
+        },
+        "env": parsed_data.get("env", {}),
         "jobs": {}
     }
 
+    # Single job 'build' with steps for each stage
+    job_steps = []
+
+    # checkout first
+    job_steps.append({"name": "Checkout code", "uses": "actions/checkout@v4"})
+
+    # add each stage as a named step
     for stage in parsed_data.get("stages", []):
-        job_name = stage["name"].lower().replace(" ", "_")
-        steps_list = [{"uses": "actions/checkout@v4"}]  # always checkout first
+        name = stage.get("name", "unnamed_stage")
+        commands = stage.get("steps", [])
+        run_block = build_run_block(commands)
+        if run_block.strip() == "":
+            # fallback - empty step (should not usually happen)
+            job_steps.append({"name": name, "run": "echo 'No commands for this stage'"})
+        else:
+            # If there are multiple lines, ensure they are preserved as multiline YAML later
+            job_steps.append({"name": f"{name} Stage", "run": run_block})
 
-        for step_cmd in stage["steps"]:
-            steps_list.append({"run": step_cmd})
+    # success / failure notification steps
+    # these mimic Jenkins post { success { ... } failure { ... } } behavior
+    success_message = parsed_data.get("env", {}).get("APP_NAME", "Pipeline") + " completed successfully!"
+    failure_message = parsed_data.get("env", {}).get("APP_NAME", "Pipeline") + " failed!"
 
-        workflow["jobs"][job_name] = {
-            "runs-on": "ubuntu-latest",
-            "steps": steps_list
-        }
+    job_steps.append({
+        "name": "Success Message",
+        "if": "success()",
+        "run": f'echo "{success_message}"'
+    })
+    job_steps.append({
+        "name": "Failure Message",
+        "if": "failure()",
+        "run": f'echo "{failure_message}"'
+    })
 
+    workflow["jobs"]["build"] = {
+        "runs-on": "ubuntu-latest",
+        "steps": job_steps
+    }
+
+    # Write YAML - preserve ordering with sort_keys=False
     with open(output_file, "w", encoding="utf-8") as f:
         yaml.dump(workflow, f, sort_keys=False)
 
-# ---------- Main Conversion ----------
-def run_conversion(input_file: str, output_dir: str = "output"):
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Wrote GitHub Actions YAML to {output_file}")
 
-    logging.info(f"Starting conversion for: {input_file}")
+def run_conversion(input_file: str, output_dir: str = "output"):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.info(f"Starting conversion: {input_file}")
     print(f"Converting: {input_file} ...")
 
     file_type = detect_file_type(input_file)
     logging.info(f"Detected file type: {file_type}")
 
-    if file_type == "jenkins":
-        parsed_data = parse_jenkinsfile(input_file)
-    elif file_type == "buildspec":
-        logging.warning("Buildspec parser not implemented yet")
-        print("❌ Buildspec detected but parser not implemented.")
-        return
-    else:
-        logging.error(f"Unsupported or unknown file type: {file_type}")
-        print(f"❌ Unsupported or unknown file type: {file_type}")
+    if file_type != "jenkins":
+        logging.error(f"Unsupported file type: {file_type}")
+        print(f"❌ Unsupported file type for this converter run: {file_type}")
         return
 
-    # Log parsed data
-    logging.info(f"Parsed stages: {len(parsed_data.get('stages', []))}")
-    for stage in parsed_data.get("stages", []):
-        logging.info(f"Stage: {stage['name']} with steps: {stage['steps']}")
+    parsed = parse_jenkinsfile(input_file)
+    if "error" in parsed:
+        logging.error(f"Parser error: {parsed['error']}")
+        print(f"Parser error: {parsed['error']}")
+        return
 
-    # Map steps
-    mappings = []
-    for stage in parsed_data.get("stages", []):
-        for step in stage["steps"]:
-            mapped = map_step_to_github(step)
-            mappings.append({"original": step, "converted": mapped})
-            logging.info(f"Mapped step: '{step}' -> '{mapped}'")
+    logging.info(f"Parsed env: {parsed.get('env', {})}")
+    logging.info(f"Parsed stages count: {len(parsed.get('stages', []))}")
 
-    # Generate YAML
-    yaml_file = output_path / "converted.yml"
-    generate_github_actions_yaml(parsed_data, yaml_file)
+    # prepare mappings for report
+    mappings = prepare_mappings(parsed)
 
-    # Generate report
-    report_file = Path("reports/conversion_report.txt")
-    report_file.parent.mkdir(parents=True, exist_ok=True)
-    generate_report(report_file, parsed_data, mappings, [], yaml_file)
+    # generate YAML
+    yaml_path = output_dir / "converted.yml"
+    generate_github_actions_yaml(parsed, yaml_path)
 
-    logging.info(f"Conversion completed. YAML: {yaml_file}, Report: {report_file}")
-    print("✅ Conversion complete!")
-    print(f"Output YAML: {yaml_file}")
-    print(f"Report: {report_file}")
+    # unmapped list - placeholder for now (we can detect unmapped commands later)
+    unmapped = []
+
+    # generate report (report_generator expects (report_path, parsed, mappings, unmapped, yaml_file) or similar)
+    # Depending on your report_generator signature use accordingly.
+    report_path = Path("reports/conversion_report.txt")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    # The report_generator created earlier expected (report_path, parsed, mappings, unmapped, output_yaml_path)
+    generate_report(report_path, parsed, mappings, unmapped, yaml_path)
+
+    logging.info(f"Conversion finished. YAML: {yaml_path}, Report: {report_path}")
+    print("✅ Conversion complete.")
+    print(f"Output YAML: {yaml_path}")
+    print(f"Report: {report_path}")
     print(f"Logs: {LOG_PATH}")
 
-# ---------- CLI ----------
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python src/converter.py <input_file> [output_dir]")
         sys.exit(1)
-
     input_file = sys.argv[1]
     output_dir = sys.argv[2] if len(sys.argv) > 2 else "output"
     run_conversion(input_file, output_dir)
