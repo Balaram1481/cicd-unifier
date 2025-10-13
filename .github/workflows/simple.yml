@@ -24,9 +24,7 @@ jobs:
       run: 'Running tests... \n echo "All Test passed!"'
     - name: Deploy Stage
       shell: bash
-      run: 'Deploying ${env.APP_NAME}......
-
-        echo "Deployment simulation complete"'
+      run: 'Deploying ${env.APP_NAME}......\n echo "Deployment simulation complete"'
     - name: Success Message
       if: success()
       run: echo "TestApp completed successfully!"
