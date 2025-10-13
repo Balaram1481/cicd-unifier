@@ -1,0 +1,28 @@
+# src/detector.py
+import os
+
+def detect_file_type(file_path: str) -> str:
+    """
+    Detects the CI/CD file type by filename and by simple content clues.
+    Returns one of: "jenkins", "buildspec", or "unknown"
+    """
+    base = os.path.basename(file_path).lower()
+
+    # filename-based detection
+    if "jenkinsfile" in base or base == "jenkinsfile":
+        return "jenkins"
+    if "buildspec" in base or base.endswith("buildspec.yml") or base.endswith("buildspec.yaml"):
+        return "buildspec"
+
+    # content-based detection
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read().lower()
+            if "pipeline {" in content or "stages {" in content or "stage(" in content:
+                return "jenkins"
+            if "phases:" in content and "commands:" in content:
+                return "buildspec"
+    except Exception:
+        pass
+
+    return "unknown"
