@@ -15,10 +15,10 @@ jobs:
       uses: actions/checkout@v4
     - name: Start Stage
       shell: bash
-      run: Starting the pipeline for ${env.APP_NAME}
+      run: Starting the pipeline for $(env.APP_NAME)
     - name: Build Stage
       shell: bash
-      run: 'Building version ${env.VERSION} \n echo "This is a build command simulation" '
+      run: 'Building version $(env.VERSION) \n echo "This is a build command simulation" '
     - name: Test Stage
       shell: bash
       run: 'Running tests... \n echo "All Test passed!"'
