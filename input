@@ -2,45 +2,71 @@ pipeline {
     agent any
 
     environment {
-        APP_NAME = "SampleApp"
-        VERSION = "1.0"
+        BUILD_ENV = "production"
+        APP_NAME = "unifier-app"
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        timestamps()
     }
 
     stages {
-        stage('Checkout') {
+        stage('Preparation') {
             steps {
+                echo "Checking out code..."
                 checkout scm
             }
         }
 
-        stage('Build') {
-            steps {
-                echo "Building the application..."
-                sh 'mvn clean package'
-            }
-        }
-
-        stage('Test') {
-            steps {
-                echo "Running tests..."
-                sh 'mvn test'
+        stage('Build Matrix') {
+            matrix {
+                axes {
+                    axis {
+                        name 'PLATFORM'
+                        values 'linux', 'windows'
+                    }
+                    axis {
+                        name 'PYTHON_VERSION'
+                        values '3.8', '3.9'
+                    }
+                }
+                stages {
+                    stage('Build') {
+                        steps {
+                            sh 'echo Building on ${PLATFORM} with Python ${PYTHON_VERSION}'
+                        }
+                    }
+                    stage('Test') {
+                        steps {
+                            sh 'pytest tests/ --maxfail=1 --disable-warnings -q'
+                        }
+                    }
+                }
             }
         }
 
         stage('Deploy') {
+            when {
+                branch 'main'
+            }
             steps {
-                echo "Deploying application..."
-                sh 'scp target/*.jar user@server:/opt/app/'
+                echo "Deploying ${APP_NAME} to ${BUILD_ENV}"
+                sh 'scp target/app.jar user@server:/opt/apps/'
             }
         }
     }
 
     post {
+        always {
+            echo 'Cleaning workspace...'
+            cleanWs()
+        }
         success {
-            echo "Build and Deployment successful!"
+            echo 'Pipeline executed successfully!'
         }
         failure {
-            echo "Build failed. Please check logs."
+            echo 'Pipeline failed, sending notification...'
         }
     }
 }
