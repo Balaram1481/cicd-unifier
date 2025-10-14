@@ -21,10 +21,10 @@ jobs:
       run: echo 'Building version $VERSION \n echo "This is a build command simulation" '
     - name: Test Stage
       shell: bash
-      run: 'Running tests... \n echo "All Test passed!"'
+      run: echo 'Running tests...... \n echo "All Test passed!" '
     - name: Deploy Stage
       shell: bash
-      run: 'Deploying ${env.APP_NAME}......\n echo "Deployment simulation complete"'
+      run: echo 'Deploying ${env.APP_NAME}......\n echo "Deployment simulation complete"'
     - name: Success Message
       if: success()
       run: echo "TestApp completed successfully!"
