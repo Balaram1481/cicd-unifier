@@ -1,41 +1,130 @@
 import re
+import logging
+
+# -------------------------------------------------------------
+# Universal Jenkinsfile Parser
+# Handles declarative & scripted syntax (basic to advanced)
+# -------------------------------------------------------------
 
 def parse_jenkinsfile(file_path):
     """
-    Extracts basic structure from a Jenkinsfile:
-    - Environment variables
-    - Stages and their steps
-    Returns a structured Python dict.
+    Parse a Jenkinsfile into a structured Python dictionary.
+    Supports stages, environment, agent, tools, post, and steps.
     """
-
-    data = {
-        "env": {},
-        "stages": []
-    }
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Extract environment variables
-        env_block = re.search(r"environment\s*\{([^}]+)\}", content, re.MULTILINE)
-        if env_block:
-            for line in env_block.group(1).splitlines():
-                match = re.match(r"\s*(\w+)\s*=\s*['\"]?([^'\"]+)['\"]?", line)
-                if match:
-                    key, value = match.groups()
-                    data["env"][key] = value.strip()
-
-        # Extract stages
-        stage_blocks = re.findall(r"stage\s*\(['\"]?([^'\"]+)['\"]?\)\s*\{([^}]+)\}", content, re.MULTILINE)
-        for name, body in stage_blocks:
-            steps = re.findall(r"(?:sh|echo)\s+['\"]([^'\"]+)['\"]", body)
-            data["stages"].append({
-                "name": name.strip(),
-                "steps": steps
-            })
-
-        return data
-
+            lines = f.readlines()
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Could not read Jenkinsfile: {str(e)}"}
+
+    data = {
+        "env": {},
+        "agent": None,
+        "tools": {},
+        "stages": [],
+        "post": {}
+    }
+
+    stage = None
+    in_env = False
+    in_tools = False
+    in_post = False
+    current_post_type = None
+
+    # Regular expressions for parsing
+    env_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*['\"]([^'\"]+)['\"]")
+    stage_pattern = re.compile(r"stage\s*\(['\"]([^'\"]+)['\"]\)")
+    echo_pattern = re.compile(r"echo\s+['\"]([^'\"]+)['\"]")
+    sh_pattern = re.compile(r"sh\s+['\"]([^'\"]+)['\"]")
+    agent_pattern = re.compile(r"agent\s*\{\s*([A-Za-z0-9_-]+)\s*\}")
+    tool_pattern = re.compile(r"([A-Za-z_]+)\s+['\"]([^'\"]+)['\"]")
+    post_pattern = re.compile(r"(success|failure|always)\s*\{")
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line or line.startswith("//"):  # skip empty/comments
+            continue
+
+        # detect start of environment block
+        if line.startswith("environment {"):
+            in_env = True
+            continue
+        elif in_env and line.startswith("}"):
+            in_env = False
+            continue
+        elif in_env:
+            match = env_pattern.search(line)
+            if match:
+                key, val = match.groups()
+                data["env"][key] = val
+            continue
+
+        # detect agent
+        if line.startswith("agent"):
+            match = agent_pattern.search(line)
+            if match:
+                data["agent"] = match.group(1)
+            continue
+
+        # detect tools
+        if line.startswith("tools {"):
+            in_tools = True
+            continue
+        elif in_tools and line.startswith("}"):
+            in_tools = False
+            continue
+        elif in_tools:
+            match = tool_pattern.search(line)
+            if match:
+                tool_type, version = match.groups()
+                data["tools"][tool_type] = version
+            continue
+
+        # detect start of post block
+        if line.startswith("post {"):
+            in_post = True
+            continue
+        elif in_post and line.startswith("}"):
+            in_post = False
+            current_post_type = None
+            continue
+        elif in_post:
+            match = post_pattern.search(line)
+            if match:
+                current_post_type = match.group(1)
+                data["post"][current_post_type] = []
+                continue
+            if current_post_type:
+                # collect post commands
+                m1 = echo_pattern.search(line)
+                m2 = sh_pattern.search(line)
+                if m1:
+                    data["post"][current_post_type].append(f"echo {m1.group(1)}")
+                elif m2:
+                    data["post"][current_post_type].append(m2.group(1))
+            continue
+
+        # detect stage
+        match_stage = stage_pattern.search(line)
+        if match_stage:
+            stage = {"name": match_stage.group(1), "steps": []}
+            data["stages"].append(stage)
+            continue
+
+        # inside stage block - capture steps
+        if stage:
+            m_echo = echo_pattern.search(line)
+            m_sh = sh_pattern.search(line)
+            if m_echo:
+                stage["steps"].append(f"echo {m_echo.group(1)}")
+            elif m_sh:
+                stage["steps"].append(m_sh.group(1))
+
+        # detect end of stage block
+        if line == "}":
+            stage = None
+
+    logging.info(f"Parsed Jenkinsfile: {file_path}")
+    return data
