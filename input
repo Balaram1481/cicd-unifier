@@ -2,47 +2,86 @@ pipeline {
     agent any
 
     environment {
-        BUILD_ENV = "production"
         APP_NAME = "unifier-app"
+        DOCKER_IMAGE = "unifier:${BUILD_NUMBER}"
+        DEPLOY_ENV = "staging"
     }
 
     options {
-        timeout(time: 20, unit: 'MINUTES')
-        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     stages {
-        stage('Preparation') {
+
+        stage('Checkout') {
             steps {
-                echo "Checking out code..."
-                checkout scm
+                echo "🌀 Checking out source code..."
+                checkout([$class: 'GitSCM', branches: [[name: '*/main']],
+                          userRemoteConfigs: [[url: 'https://github.com/ch-balaram/unifier.git']]])
             }
         }
 
-        stage('Build Matrix') {
-            matrix {
-                axes {
-                    axis {
-                        name 'PLATFORM'
-                        values 'linux', 'windows'
-                    }
-                    axis {
-                        name 'PYTHON_VERSION'
-                        values '3.8', '3.9'
-                    }
-                }
-                stages {
-                    stage('Build') {
-                        steps {
-                            sh 'echo Building on ${PLATFORM} with Python ${PYTHON_VERSION}'
-                        }
-                    }
-                    stage('Test') {
-                        steps {
-                            sh 'pytest tests/ --maxfail=1 --disable-warnings -q'
-                        }
+        stage('Setup Python Environment') {
+            steps {
+                echo "🐍 Setting up Python environment..."
+                sh '''
+                    python3 -m venv venv
+                    source venv/bin/activate
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Build') {
+            parallel {
+                stage('Backend Build') {
+                    steps {
+                        echo "⚙️ Building backend..."
+                        sh 'mvn clean package -DskipTests'
                     }
                 }
+                stage('Frontend Build') {
+                    steps {
+                        echo "🎨 Building frontend..."
+                        sh '''
+                            npm install
+                            npm run build
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                echo "🧪 Running unit tests..."
+                sh '''
+                    pytest --maxfail=2 --disable-warnings -q
+                    npm test
+                '''
+            }
+            post {
+                always {
+                    junit '**/target/surefire-reports/*.xml'
+                    archiveArtifacts artifacts: 'reports/**/*', fingerprint: true
+                }
+                failure {
+                    mail to: 'devops-team@company.com',
+                         subject: "❌ Build Failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                         body: "Build failed. Check Jenkins for details."
+                }
+            }
+        }
+
+        stage('Docker Build and Push') {
+            steps {
+                echo "🐳 Building Docker image..."
+                sh '''
+                    docker build -t $DOCKER_IMAGE .
+                    docker tag $DOCKER_IMAGE myregistry.io/$DOCKER_IMAGE
+                    docker push myregistry.io/$DOCKER_IMAGE
+                '''
             }
         }
 
@@ -51,22 +90,25 @@ pipeline {
                 branch 'main'
             }
             steps {
-                echo "Deploying ${APP_NAME} to ${BUILD_ENV}"
-                sh 'scp target/app.jar user@server:/opt/apps/'
+                echo "🚀 Deploying $APP_NAME to $DEPLOY_ENV..."
+                sh '''
+                    kubectl config use-context ${DEPLOY_ENV}
+                    kubectl apply -f k8s/deployment.yaml
+                    kubectl rollout status deployment/${APP_NAME}
+                '''
             }
         }
     }
 
     post {
-        always {
-            echo 'Cleaning workspace...'
-            cleanWs()
-        }
         success {
-            echo 'Pipeline executed successfully!'
+            echo "✅ Build and deployment successful!"
         }
         failure {
-            echo 'Pipeline failed, sending notification...'
+            echo "❌ Build failed!"
+        }
+        always {
+            cleanWs()
         }
     }
 }
