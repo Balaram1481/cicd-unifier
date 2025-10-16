@@ -1,130 +1,133 @@
-import re
+import os
+import json
 import logging
+from logging.handlers import RotatingFileHandler
+from tree_sitter import Language, Parser
 
-# -------------------------------------------------------------
-# Universal Jenkinsfile Parser
-# Handles declarative & scripted syntax (basic to advanced)
-# -------------------------------------------------------------
+# ---------------------------
+# Setup Logging
+# ---------------------------
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "unifier_parser.log")
 
-def parse_jenkinsfile(file_path):
+logger = logging.getLogger("UnifierParser")
+logger.setLevel(logging.DEBUG)
+
+# File handler (rotating)
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3)
+file_handler.setLevel(logging.DEBUG)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Formatter
+formatter = logging.Formatter(
+    "[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Attach handlers
+if not logger.handlers:
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+# ---------------------------
+# Load Tree-sitter Language
+# ---------------------------
+try:
+    GROOVY_LANGUAGE = Language("build/my-languages.so", "groovy")
+    logger.info("✅ Groovy language loaded successfully.")
+except Exception as e:
+    logger.error(f"❌ Failed to load Groovy language: {e}")
+    raise SystemExit(1)
+
+
+def node_text(source, node):
+    return source[node.start_byte:node.end_byte].decode("utf8")
+
+
+def extract_pipeline_structure(file_path: str):
     """
-    Parse a Jenkinsfile into a structured Python dictionary.
-    Supports stages, environment, agent, tools, post, and steps.
+    Traverses the AST to extract key Jenkinsfile elements:
+      - stages
+      - steps
+      - environment
+      - agent
+      - post blocks
     """
+    logger.info(f"🔍 Starting to parse Jenkinsfile: {file_path}")
+    if not os.path.exists(file_path):
+        logger.error(f"File not found: {file_path}")
+        raise FileNotFoundError(file_path)
+
+    with open(file_path, "r") as f:
+        source = f.read().encode()
+
+    parser = Parser()
+    parser.set_language(GROOVY_LANGUAGE)
+    tree = parser.parse(source)
+    root = tree.root_node
+    logger.debug(f"Root node type: {root.type}")
+
+    pipeline_data = {"stages": [], "environment": {}, "agent": None, "post": {}}
+
+    def walk(node):
+        # Detect pipeline declaration
+        if node.type == "method_call" and b"pipeline" in source[node.start_byte:node.end_byte]:
+            logger.debug(f"Pipeline node detected at {node.start_point}")
+            for child in node.children:
+                walk(child)
+
+        # Detect stage
+        if node.type == "method_call" and b"stage" in source[node.start_byte:node.end_byte]:
+            try:
+                stage_name = node_text(source, node).split("(")[1].split(")")[0].strip('"\'')
+                logger.info(f"🧩 Found stage: {stage_name}")
+                stage_steps = []
+                for sub in node.children:
+                    if sub.type == "block":
+                        for line in sub.children:
+                            if b"sh" in source[line.start_byte:line.end_byte] or b"echo" in source[line.start_byte:line.end_byte]:
+                                step_text = node_text(source, line).strip()
+                                stage_steps.append(step_text)
+                                logger.debug(f"  ↳ Step: {step_text}")
+                pipeline_data["stages"].append({"name": stage_name, "steps": stage_steps})
+            except Exception as e:
+                logger.warning(f"⚠️ Could not parse stage at {node.start_point}: {e}")
+
+        # Detect environment
+        if node.type == "method_call" and b"environment" in source[node.start_byte:node.end_byte]:
+            logger.info("🌍 Extracting environment variables...")
+            block_text = node_text(source, node)
+            for line in block_text.split("\n"):
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    pipeline_data["environment"][key.strip()] = val.strip().strip('"\'')
+                    logger.debug(f"  ↳ {key.strip()} = {val.strip().strip('\"\'')}")
+        for c in node.children:
+            walk(c)
+
+    walk(root)
+    logger.info("✅ Jenkinsfile parsing complete.")
+    return pipeline_data
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python jenkins_parser_treesitter.py <Jenkinsfile>")
+        sys.exit(1)
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        data = extract_pipeline_structure(sys.argv[1])
+        output_file = "parsed_output.json"
+        with open(output_file, "w") as f:
+            json.dump(data, f, indent=4)
+        logger.info(f"📄 Output saved to {output_file}")
+        print(json.dumps(data, indent=4))
     except Exception as e:
-        return {"error": f"Could not read Jenkinsfile: {str(e)}"}
-
-    data = {
-        "env": {},
-        "agent": None,
-        "tools": {},
-        "stages": [],
-        "post": {}
-    }
-
-    stage = None
-    in_env = False
-    in_tools = False
-    in_post = False
-    current_post_type = None
-
-    # Regular expressions for parsing
-    env_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*['\"]([^'\"]+)['\"]")
-    stage_pattern = re.compile(r"stage\s*\(['\"]([^'\"]+)['\"]\)")
-    echo_pattern = re.compile(r"echo\s+['\"]([^'\"]+)['\"]")
-    sh_pattern = re.compile(r"sh\s+['\"]([^'\"]+)['\"]")
-    agent_pattern = re.compile(r"agent\s*\{\s*([A-Za-z0-9_-]+)\s*\}")
-    tool_pattern = re.compile(r"([A-Za-z_]+)\s+['\"]([^'\"]+)['\"]")
-    post_pattern = re.compile(r"(success|failure|always)\s*\{")
-
-    for raw_line in lines:
-        line = raw_line.strip()
-
-        if not line or line.startswith("//"):  # skip empty/comments
-            continue
-
-        # detect start of environment block
-        if line.startswith("environment {"):
-            in_env = True
-            continue
-        elif in_env and line.startswith("}"):
-            in_env = False
-            continue
-        elif in_env:
-            match = env_pattern.search(line)
-            if match:
-                key, val = match.groups()
-                data["env"][key] = val
-            continue
-
-        # detect agent
-        if line.startswith("agent"):
-            match = agent_pattern.search(line)
-            if match:
-                data["agent"] = match.group(1)
-            continue
-
-        # detect tools
-        if line.startswith("tools {"):
-            in_tools = True
-            continue
-        elif in_tools and line.startswith("}"):
-            in_tools = False
-            continue
-        elif in_tools:
-            match = tool_pattern.search(line)
-            if match:
-                tool_type, version = match.groups()
-                data["tools"][tool_type] = version
-            continue
-
-        # detect start of post block
-        if line.startswith("post {"):
-            in_post = True
-            continue
-        elif in_post and line.startswith("}"):
-            in_post = False
-            current_post_type = None
-            continue
-        elif in_post:
-            match = post_pattern.search(line)
-            if match:
-                current_post_type = match.group(1)
-                data["post"][current_post_type] = []
-                continue
-            if current_post_type:
-                # collect post commands
-                m1 = echo_pattern.search(line)
-                m2 = sh_pattern.search(line)
-                if m1:
-                    data["post"][current_post_type].append(f"echo {m1.group(1)}")
-                elif m2:
-                    data["post"][current_post_type].append(m2.group(1))
-            continue
-
-        # detect stage
-        match_stage = stage_pattern.search(line)
-        if match_stage:
-            stage = {"name": match_stage.group(1), "steps": []}
-            data["stages"].append(stage)
-            continue
-
-        # inside stage block - capture steps
-        if stage:
-            m_echo = echo_pattern.search(line)
-            m_sh = sh_pattern.search(line)
-            if m_echo:
-                stage["steps"].append(f"echo {m_echo.group(1)}")
-            elif m_sh:
-                stage["steps"].append(m_sh.group(1))
-
-        # detect end of stage block
-        if line == "}":
-            stage = None
-
-    logging.info(f"Parsed Jenkinsfile: {file_path}")
-    return data
+        logger.exception(f"❌ Parsing failed: {e}")
+        sys.exit(1)
